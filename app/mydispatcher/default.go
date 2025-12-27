@@ -9,9 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wyx2685/XrayR/common/counter" // 确保路径指向你提供的 xraytraffic.go
-	"github.com/wyx2685/XrayR/common/rate"    // 确保包含我们创建的 managed_writer.go
-	
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -35,108 +32,6 @@ import (
 )
 
 var errSniffingTimeout = newError("timeout on sniffing")
-
-type DefaultDispatcher struct {
-	ohm     outbound.Manager
-	router  routing.Router
-	policy  policy.Manager
-	stats   stats.Manager
-	Limiter *limiter.InboundInfo
-}
-
-func NewDefaultDispatcher(ctx context.Context, config *dispatcher.Config) (*DefaultDispatcher, error) {
-	v := core.MustFromContext(ctx)
-	d := &DefaultDispatcher{
-		ohm:    v.GetFeature(outbound.ManagerType()).(outbound.Manager),
-		router: v.GetFeature(routing.RouterType()).(routing.Router),
-		policy: v.GetFeature(policy.ManagerType()).(policy.Manager),
-		stats:  v.GetFeature(stats.ManagerType()).(stats.Manager),
-	}
-	if err := v.RegisterFeature(dispatcher.Type(), d); err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-
-func (d *DefaultDispatcher) Type() interface{} {
-	return dispatcher.Type()
-}
-
-func (d *DefaultDispatcher) Start() error {
-	return nil
-}
-
-func (d *DefaultDispatcher) Close() error {
-	return nil
-}
-
-// Dispatch 实现核心分发逻辑并注入设备限制
-func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destination) (*transport.Link, error) {
-	if !destination.IsValid() {
-		return nil, errors.New("dispatcher: invalid destination")
-	}
-
-	// 1. 获取用户信息
-	var email string
-	if s := session.InboundFromContext(ctx); s != nil && s.User != nil {
-		email = s.User.Email
-	}
-
-	// 2. 建立基础 Pipe 链路
-	opt := pipe.OptionsFromContext(ctx)
-	up, _ := pipe.New(opt...)
-	down, _ := pipe.New(opt...)
-
-	// link 是发往 Outbound 的数据流
-	link := &transport.Link{
-		Reader: up.Reader,
-		Writer: down.Writer,
-	}
-	// responseLink 是发回 Inbound (客户端) 的数据流
-	responseLink := &transport.Link{
-		Reader: down.Reader,
-		Writer: up.Writer,
-	}
-
-	// 3. 核心注入：LinkManager 与设备判定 (v2node 风格)
-	if email != "" && d.Limiter != nil {
-		// A. 获取该用户的实时连接计数器
-		lm := d.Limiter.GetLinkManager(email)
-
-		// B. 从 session 中获取 IP 和 协议
-		var ip string
-		if s := session.InboundFromContext(ctx); s != nil && s.Source.Address != nil {
-			ip = s.Source.Address.String()
-		}
-		
-		// C. 检查设备数是否超限 (使用我们修改过的 GetUserBucket)
-		userBucket, reject := d.Limiter.GetUserBucket(email, ip, "tcp/udp")
-		if reject {
-			// 如果超出设备限制，立即中断链路并返回错误
-			common.Close(link.Writer)
-			common.Interrupt(link.Reader)
-			return nil, errors.New("device limit reached")
-		}
-
-		// D. 增加连接计数
-		lm.Add(1)
-
-		// E. 注入 ManagedWriter 到回程流量，确保 Close 时计数减量
-		responseLink.Writer = rate.NewManagedWriter(responseLink.Writer, func() {
-			lm.Add(-1)
-		})
-
-		// F. 如果有限速要求，继续叠加 RateLimitWriter
-		if userBucket != nil {
-			responseLink.Writer = rate.NewRateLimitWriter(responseLink.Writer, userBucket)
-		}
-	}
-
-	// 4. 处理路由分发
-	go d.routedDispatch(ctx, destination, responseLink)
-
-	return link, nil
-}
 
 type cachedReader struct {
 	sync.Mutex
