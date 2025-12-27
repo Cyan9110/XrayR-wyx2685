@@ -11,7 +11,6 @@ import (
 
 	"github.com/wyx2685/XrayR/common/counter" // 确保路径指向你提供的 xraytraffic.go
 	"github.com/wyx2685/XrayR/common/rate"    // 确保包含我们创建的 managed_writer.go
-	"github.com/wyx2685/XrayR/limiter"       // 确保包含修改后的 limiter.go
 	
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
