@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic" // 修复 undefined: atomic
 	"time"
 
 	"github.com/eko/gocache/lib/v4/cache"
@@ -18,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 	"github.com/wyx2685/XrayR/api"
+	"github.com/wyx2685/XrayR/common/counter" // 修复 undefined: counter
 	"golang.org/x/time/rate"
 )
 
@@ -42,11 +44,13 @@ type InboundInfo struct {
 		globalOnlineIP *marshaler.Marshaler
 	}
 	AliveList     map[int]int // Key: Uid, value: alive_ip
-	OldUserOnline *sync.Map   // Key: Ip, value: Uid
 }
 
 // GetLinkManager 获取或初始化用户的连接计数器
 func (d *InboundInfo) GetLinkManager(email string) *counter.XrayTrafficCounter {
+	if d.LinkManagers == nil {
+		d.LinkManagers = new(sync.Map)
+	}
 	if v, ok := d.LinkManagers.Load(email); ok {
 		return v.(*counter.XrayTrafficCounter)
 	}
@@ -147,7 +151,7 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 	}
 
 	if globalLimit != nil && globalLimit.Enable {
-		inboundInfo.GlobalLimit.config = globalLimit
+		.GlobalLimit.config = globalLimit
 
 		// init local store
 		gs := goCacheStore.NewGoCache(goCache.New(time.Duration(globalLimit.Expiry)*time.Second, 1*time.Minute))
@@ -168,7 +172,7 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 			cache.New[any](gs), // go-cache is priority
 			cache.New[any](rs),
 		)
-		inboundInfo.GlobalLimit.globalOnlineIP = marshaler.New(cacheManager)
+		.GlobalLimit.globalOnlineIP = marshaler.New(cacheManager)
 	}
 
 	userMap := new(sync.Map)
@@ -179,31 +183,31 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 			DeviceLimit: u.DeviceLimit,
 		})
 	}
-	inboundInfo.UserInfo = userMap
-	l.InboundInfo.Store(tag, inboundInfo) // Replace the old inbound info
+	.UserInfo = userMap
+	l..Store(tag, ) // Replace the old inbound info
 	return nil
 }
 
 func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserInfo) error {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
+	if value, ok := l..Load(tag); ok {
+		 := value.(*)
 		// Update User info
 		for _, u := range *updatedUserList {
-			inboundInfo.UserInfo.Store(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID), UserInfo{
+			.UserInfo.Store(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID), UserInfo{
 				UID:         u.UID,
 				SpeedLimit:  u.SpeedLimit,
 				DeviceLimit: u.DeviceLimit,
 			})
 			// Update old limiter bucket
-			limit := determineRate(inboundInfo.NodeSpeedLimit, u.SpeedLimit)
+			limit := determineRate(.NodeSpeedLimit, u.SpeedLimit)
 			if limit > 0 {
-				if bucket, ok := inboundInfo.BucketHub.Load(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)); ok {
+				if bucket, ok := .BucketHub.Load(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)); ok {
 					limiter := bucket.(*rate.Limiter)
 					limiter.SetLimit(rate.Limit(limit))
 					limiter.SetBurst(int(limit))
 				}
 			} else {
-				inboundInfo.BucketHub.Delete(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID))
+				.BucketHub.Delete(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID))
 			}
 		}
 	} else {
@@ -213,24 +217,24 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 }
 
 func (l *Limiter) DeleteInboundLimiter(tag string) error {
-	l.InboundInfo.Delete(tag)
+	l..Delete(tag)
 	return nil
 }
 
 func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
 	var onlineUser []api.OnlineUser
 
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
+	if value, ok := l..Load(tag); ok {
+		 := value.(*)
 		// Clear Speed Limiter bucket for users who are not online
-		inboundInfo.BucketHub.Range(func(key, value interface{}) bool {
+		.BucketHub.Range(func(key, value interface{}) bool {
 			email := key.(string)
-			if _, exists := inboundInfo.UserOnlineIP.Load(email); !exists {
-				inboundInfo.BucketHub.Delete(email)
+			if _, exists := .UserOnlineIP.Load(email); !exists {
+				.BucketHub.Delete(email)
 			}
 			return true
 		})
-		inboundInfo.UserOnlineIP.Range(func(key, value interface{}) bool {
+		.UserOnlineIP.Range(func(key, value interface{}) bool {
 			email := key.(string)
 			ipMap := value.(*sync.Map)
 			ipMap.Range(func(key, value interface{}) bool {
@@ -388,4 +392,11 @@ func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
 			return nodeLimit
 		}
 	}
+}
+// 补全缺失的方法调用（如果你的文件末尾没有这些，请保留）
+func (d *InboundInfo) GetSpeedBucket(email string) *rate.Limiter {
+	if v, ok := d.BucketHub.Load(email); ok {
+		return v.(*rate.Limiter)
+	}
+	return nil
 }
