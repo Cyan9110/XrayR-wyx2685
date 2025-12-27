@@ -33,6 +33,10 @@ type InboundInfo struct {
 	UserInfo       *sync.Map // Key: Email value: UserInfo
 	BucketHub      *sync.Map // key: Email, value: *rate.Limiter
 	UserOnlineIP   *sync.Map // Key: Email, value: {Key: IP, value: UID}
+	// --- 新增字段 ---
+	OldUserOnline  *sync.Map // Key: IP, value: UID
+	LinkManagers   *sync.Map // Key: Email, value: *counter.XrayTrafficCounter
+	// ---------------
 	GlobalLimit    struct {
 		config         *GlobalDeviceLimitConfig
 		globalOnlineIP *marshaler.Marshaler
@@ -41,6 +45,88 @@ type InboundInfo struct {
 	OldUserOnline *sync.Map   // Key: Ip, value: Uid
 }
 
+// GetLinkManager 获取或初始化用户的连接计数器
+func (d *InboundInfo) GetLinkManager(email string) *counter.XrayTrafficCounter {
+	if v, ok := d.LinkManagers.Load(email); ok {
+		return v.(*counter.XrayTrafficCounter)
+	}
+	newCounter := &counter.XrayTrafficCounter{V: new(atomic.Int64)}
+	d.LinkManagers.Store(email, newCounter)
+	return newCounter
+}
+
+func (d *InboundInfo) GetUserBucket(email string, ip string, protocol string) (Bucket *rate.Limiter, reject bool) {
+	// 1. IP 规范化
+	ip = strings.TrimPrefix(ip, "::ffff:")
+
+	var deviceLimit int = 0
+	var uid int = 0
+	if v, ok := d.UserInfo.Load(email); ok {
+		user := v.(UserInfo)
+		deviceLimit = user.DeviceLimit
+		uid = user.UID
+	}
+
+	var userIPMap *sync.Map
+	if m, ok := d.UserOnlineIP.Load(email); ok {
+		userIPMap = m.(*sync.Map)
+	} else {
+		userIPMap = new(sync.Map)
+		d.UserOnlineIP.Store(email, userIPMap)
+	}
+
+	// 2. 检查当前周期是否已记录
+	if _, ok := userIPMap.Load(ip); ok {
+		return d.getSpeedBucket(email), false
+	}
+
+	// 3. 检查旧周期缓存 (v2node 核心逻辑：存量 IP 不计入新连接判定)
+	if d.OldUserOnline != nil {
+		if v, ok := d.OldUserOnline.Load(ip); ok {
+			if v.(int) == uid {
+				userIPMap.Store(ip, uid)
+				d.OldUserOnline.Delete(ip)
+				return d.getSpeedBucket(email), false
+			}
+		}
+	}
+
+	// 4. 判定是否超限
+	aliveIp := 0
+	if v, ok := d.AliveList[uid]; ok {
+		aliveIp = v
+	}
+	if deviceLimit > 0 && aliveIp >= deviceLimit {
+		return nil, true
+	}
+
+	// 5. 记录新 IP 并返回限速桶
+	userIPMap.Store(ip, uid)
+	return d.getSpeedBucket(email), false
+}
+
+// GetOnlineDevice 执行上报并切换缓冲
+func (d *InboundInfo) GetOnlineDevice() []api.OnlineUser {
+	var onlineUser []api.OnlineUser
+	d.OldUserOnline = new(sync.Map) 
+
+	d.UserOnlineIP.Range(func(key, value interface{}) bool {
+		email := key.(string)
+		ipMap := value.(*sync.Map)
+		ipMap.Range(func(ip, uid interface{}) bool {
+			onlineUser = append(onlineUser, api.OnlineUser{
+				UID: uid.(int),
+				IP:  ip.(string),
+			})
+			d.OldUserOnline.Store(ip, uid) // 存入旧列表以备下个周期“捞回”
+			return true
+		})
+		return true
+	})
+
+	d.UserOnlineIP = new(sync.Map) // 清空当前统计
+	return onlineUser
+}
 type Limiter struct {
 	InboundInfo *sync.Map // Key: Tag, Value: *InboundInfo
 }
